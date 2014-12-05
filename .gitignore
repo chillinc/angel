@@ -1,0 +1,20 @@
+# Ignore compiled files:
+*.class
+*.o
+*.py[co]
+*.conf[co]
+
+# Ignore tmp files:
+*.swp
+.coverage
+.DS_Store
+.pyhistory
+
+# Ignore IDE files:
+.idea
+.metadata
+.project
+.pydevproject
+*.sublime-project
+*.sublime-workspace
+nbproject
