@@ -1,0 +1,115 @@
+
+# Makefile logic for Jenkins.
+#  - Most likely, you'll only want to call "make jenkins-build-debian", "make jenkins-build-to-git", or "make jenkins-build-debian-with-tests".
+#  - We assume the jenkins master runs on the same server as the repo.
+
+# These variables rely on ENV variables set by Jenkins:
+JENKINS_RUNTEST_PORT_NUMBER:=14$(EXECUTOR_NUMBER)00
+JENKINS_RUNTEST_OUTPUT_DIR:=$(WORKSPACE)/tmp/logs-for-hudson
+JENKINS_RUNTEST_ANGEL_BASEDIR:=$(WORKSPACE)/tmp/hudson-tmp
+
+
+
+.PHONY: jenkins-build-debian
+jenkins-build-debian: debian-package-and-repo-install
+	@# Nothing to do here.
+
+
+
+.PHONY: jenkins-build-debian-master
+jenkins-build-debian-master: jenkins-build-debian
+	@echo "Merging master to prod"
+	git checkout prod
+	git pull
+	git merge --no-ff master
+	git push origin prod
+	git checkout master
+
+
+
+.PHONY: jenkins-build-to-git
+jenkins-build-to-git: clean-python-stale-pyc
+	LOCKNAME=build-$(RELEASE_BRANCH_NAME)-$(shell id -u) angel-lockrun $(MAKE) $(MFLAGS) release-to-local-compiled-git
+	@#LOCKNAME=build-$(RELEASE_BRANCH_NAME) angel-lockrun $(MAKE) $(MFLAGS) jenkins-build-to-git-helper
+
+
+.PHONY: jenkins-build-to-git-helpder
+jenkins-build-to-git-helper:
+	@# This target can be called to lock git during a build (i.e. to prevent multiple concurrent runs).
+
+	@# We create .git/index.lock here so that concurrent builds don't change
+	@# what we're building out from underneath us. This is a little gross, but
+	@# the jenkins git plugin doesn't have an option to "build each branch one-at-a-time".
+	set -o noclobber && /bin/echo "Building $$GIT_COMMIT at `date`" > .git/index.lock
+
+	@echo "env.GIT_COMMIT: $$GIT_COMMIT"
+	@echo ".git/HEAD: `cat .git/HEAD`"
+	if [ "$$GIT_COMMIT" != "`cat .git/HEAD`" ] ; then echo "GIT_COMMIT and .git/HEAD don't match!?" && rm .git/index.lock && git fetch && git checkout $$GIT_COMMIT && /bin/echo "Building $$GIT_COMMIT at `date` with manual checkout" > .git/index.lock ; fi
+	$(MAKE) $(MFLAGS) release-to-local-compiled-git || (rm .git/index.lock && exit 5)
+	rm .git/index.lock
+
+
+
+.PHONY: jenkins-test
+jenkins-test:
+	@$(MAKE) RUN_TESTS_FLAGS="--stop -v -a !skip-for-build" $(MFLAGS) test
+
+
+
+jenkins-$(DEBIAN_DEBBUILD_OUTPUTFILE): jenkins-build-debian-package
+	@# This target is normally triggered by jenkins-deploy.
+
+
+
+.PHONY: jenkins-build-debian-with-tests
+jenkins-build-debian-with-tests:
+	$(MAKE) $(MFLAGS) jenkins-runtests
+	$(MAKE) $(MFLAGS) jenkins-build-debian
+
+
+
+.PHONY: jenkins-runtests
+jenkins-runtests:
+	#-rm -rf "$(JENKINS_RUNTEST_OUTPUT_DIR)"
+	#mkdir -p "$(JENKINS_RUNTEST_OUTPUT_DIR)"
+	#./hsn/tests/hsn-runtests $(JENKINS_RUNTEST_PORT_NUMBER) "$(JENKINS_RUNTEST_OUTPUT_DIR)"
+	#rsync -a `./services/devops/bin/chill-wrapper $(JENKINS_RUNTEST_PORT_NUMBER) show variable LOG_DIR` "$(JENKINS_RUNTEST_OUTPUT_DIR)"
+
+	@# Run tests in a temporary install:
+	./services/devops/bin/chill-wrapper $(JENKINS_RUNTEST_PORT_NUMBER) service start --wait 120 && \
+		$(MAKE) test; \
+		export ret_val=$$? ; \
+		./services/devops/bin/chill-wrapper $(JENKINS_RUNTEST_PORT_NUMBER) service stop --fast && \
+		exit $$ret_val
+	@# Start chill and if that works run site.py; capture exit code; run stop and if that works then exit with exit code.
+	@# If either start or stop fail, then the boolean ands will trigger a non-zero exit.
+	@# Make escapes $'s, so $$? is the same as $? on the shell, which is the last command's exit code.
+
+
+
+.PHONY: jenkins-build-debian
+jenkins-build-debian-package: clean-python-stale-pyc
+	@#if [ -z "$(JENKINS_CHILL_BASEDIR)" ] ; then echo "Error: JENKINS_CHILL_BASEDIR isn't defined; is this being run from Jenkins?" && exit 1 ; fi
+	@#rm -rf "$(JENKINS_CHILL_BASEDIR)"
+	@#mkdir -p "$(JENKINS_CHILL_BASEDIR)/conf"
+	@#echo "LOG_DIR='$(JENKINS_CHILL_BASEDIR)/log'" > "$(JENKINS_CHILL_BASEDIR)/conf/log_dir.conf"
+	@#echo "LOCK_DIR='$(JENKINS_CHILL_BASEDIR)/lock'" > "$(JENKINS_CHILL_BASEDIR)/conf/lock_dir.conf"
+	@#echo "RUN_DIR='$(JENKINS_CHILL_BASEDIR)/run'" > "$(JENKINS_CHILL_BASEDIR)/conf/run_dir.conf"
+	@#echo "DATA_DIR='$(JENKINS_CHILL_BASEDIR)/data'" > "$(JENKINS_CHILL_BASEDIR)/conf/data_dir.conf"
+	@#echo "TMP_DIR='$(JENKINS_CHILL_BASEDIR)/tmp'" > "$(JENKINS_CHILL_BASEDIR)/conf/tmp_dir.conf"
+	@#echo "CACHE_DIR='$(JENKINS_CHILL_BASEDIR)/cache'" > "$(JENKINS_CHILL_BASEDIR)/conf/cache_dir.conf"
+	@#ANGEL_CONF_DIR="$(JENKINS_CHILL_BASEDIR)/conf/" time $(MAKE) $(MFLAGS) debian-package
+
+	time $(MAKE) $(MFLAGS) debian-package
+
+
+
+jenkins-remove-old-tags:
+	# There's no way in git to remove local tags that were delete from the server; so delete all then fetch them.
+	# This has the downside of removing local tags that haven't been synced...
+	git tag -l | xargs git tag -d
+	git fetch
+	git config core.preloadindex true
+
+	# To-do: figure out how to clean only tags for branches that have been deleted / tags that are older than 1 month
+	git tag | egrep 'jenkins|jenkins' | grep -v jenkins-prod- | grep -v jenkins-prod- | xargs -I {} bash -c "git tag -d '{}'; git push origin ':refs/tags/{}'; sleep 1;"

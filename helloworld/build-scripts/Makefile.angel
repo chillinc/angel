@@ -1,0 +1,188 @@
+
+# Include subdir Makefiles:
+include $(call angel-get-cwd)/*/Makefile.angel
+
+# Name of current branch:
+# This is tricky: if .git/HEAD is a sha1 in detached state, then we're on Jenkins
+# and GIT_BRANCH will be set to "origin/<branch>"; otherwise .git/HEAD will be
+# a ref; by catting .git/HEAD and adding GIT_BRANCH, the third field will be the
+# branch name in either case.
+RELEASE_BRANCH_NAME=$(shell echo `cat .git/HEAD 2>/dev/null`/$$GIT_BRANCH | cut -d '/' -f 3)
+
+# We don't define RELEASE_BRANCH_VERSION, because it's expensive to generate.
+
+# Path to where we create stage_dir and .git files:
+RELEASE_BUILD_BASE_DIR=.build_release/$(RELEASE_BRANCH_NAME)
+
+# Path under build root that files should be staged at:
+RELEASE_BUILD_ROOT_SUBDIR=root
+
+# Path to release build (which contains all the files exactly as they should be under a versioned dir on install):
+RELEASE_BUILD_STAGE_DIR?=$(RELEASE_BUILD_BASE_DIR)/$(RELEASE_BUILD_ROOT_SUBDIR)
+
+# Where do versioned installs live?
+RELEASE_INSTALL_VERSIONS_DIR=/usr/lib/angel
+
+# Rsync options (note that if you delete/rename anything in rsync dirs, it'll remain around in existing builds!)
+RELEASE_BUILD_RSYNC_SRC_DIRS=built bin code services share
+RELEASE_BUILD_RSYNC_FLAGS=-v --delete --delete-excluded -W -a --exclude tmp-build-path --exclude .git --exclude .gitignore --exclude Makefile --exclude Makefile.angel --exclude _disabled-services --exclude 'services/*/src' --exclude '*.pyo'
+
+# Path top of repo used for managing git repos:
+RELEASE_REPO_BASE_DIR?=~repo/branches
+RELEASE_REPO_BRANCH_DIR=$(RELEASE_REPO_BASE_DIR)/$(RELEASE_BRANCH_NAME).git
+
+
+.PHONY: release-build
+release-build: release-build-dependencies $$(ANGEL_BUILD_TARGETS) test-for-untracked-files
+	env | grep GIT
+	@if [ "x" == "x$(RELEASE_BRANCH_NAME)" ] ; then echo "RELEASE_BRANCH_NAME not set!" && exit 1 ; fi
+
+	@# Compile all python .py files:
+	@# (Set mtimes to commit times so that .pyc files will get consistent date-time embedded data, so we
+	@# don't flip-flop between versions in the git binary repo. Do NOT do this normally; it'll break make.)
+	@# Update: disabling this as there may be a race condition here between commit-commit-build?
+	@#$(ANGEL_BUILD_SCRIPTS_DIR)/git/bin/git-set-mtimes-to-match-commit-times
+	$(ANGEL_PYTHON) -mcompileall -x share/hadoop/ -q $(RELEASE_BUILD_RSYNC_SRC_DIRS)
+
+	@# Remove any stale .pyc files under paths that we develop in that don't have a corresponding .py files:
+	@# (We do it this way for speed.)
+	$(MAKE) clean-python-stale-pyc
+
+	mkdir -p $(RELEASE_BUILD_STAGE_DIR)
+
+	@# Verify that the version inside the release build is older than what we're about to sync.
+	@# This is a safety check because the Jenkins git plugin can potentially build things out-of-order.
+	if [ -e "$(RELEASE_BUILD_STAGE_DIR)/.angel/code_version" ] ; then $(ANGEL_BUILD_SCRIPTS_BIN_DIR)/chill-check-second-version-is-newer $(shell cat $(RELEASE_BUILD_STAGE_DIR)/.angel/code_version) $(shell $(ANGEL_BUILD_SCRIPTS_BIN_DIR)/chill-build-get-code-version) ; fi
+
+	@# It's possible our build files got reset, but the binary repo exists, in which case we need to pull the files in first:
+	-cd "$(RELEASE_BUILD_STAGE_DIR)" && git pull --ff-only
+
+	@# We use rsync to copy specific subdirs into a cache path, and exclude a number of file names from our "compiled" builds:
+	time rsync $(RELEASE_BUILD_RSYNC_FLAGS) $(RELEASE_BUILD_RSYNC_SRC_DIRS) "$(RELEASE_BUILD_STAGE_DIR)"
+
+	@# Create .angel files that define the branch and version info, along with post-activate logic for angel version manager:
+	rm -rf "$(RELEASE_BUILD_STAGE_DIR)/.angel"
+	cp -a "$(ANGEL_BUILD_SCRIPTS_DIR)/angel" "$(RELEASE_BUILD_STAGE_DIR)/.angel"
+	echo $(RELEASE_BRANCH_NAME) > "$(RELEASE_BUILD_STAGE_DIR)/.angel/code_branch"
+	echo "$(shell $(ANGEL_BUILD_SCRIPTS_BIN_DIR)/chill-build-get-code-version)" > "$(RELEASE_BUILD_STAGE_DIR)/.angel/code_version"
+	time "$(ANGEL_BUILD_SCRIPTS_DIR)/bin/angel-get-checksums" "$(RELEASE_BUILD_STAGE_DIR)" >file_checksums && mv file_checksums "$(RELEASE_BUILD_STAGE_DIR)/.angel/file_checksums"
+	date >> "$(RELEASE_BUILD_STAGE_DIR)/.angel/build"-$(RELEASE_BRANCH_NAME)-`cat "$(RELEASE_BUILD_STAGE_DIR)/.angel/code_version"`
+
+
+.PHONY: release-to-local-fs
+release-to-local-fs:
+	$(MAKE) $(MFLAGS) release-build
+	sudo ./bin/angel --skip-make package add-version "$(RELEASE_INSTALL_VERSIONS_DIR)" "$(RELEASE_BUILD_STAGE_DIR)" "$(RELEASE_BRANCH_NAME)" `cat "$(RELEASE_BUILD_STAGE_DIR)/.angel/code_version"`
+	sudo "$(RELEASE_INSTALL_VERSIONS_DIR)"/$(RELEASE_BRANCH_NAME)/`cat "$(RELEASE_BUILD_STAGE_DIR)/.angel/code_version"`/bin/angel \
+		package upgrade --branch "$(RELEASE_BRANCH_NAME)" --version `cat "$(RELEASE_BUILD_STAGE_DIR)/.angel/code_version"`
+
+
+.PHONY: release-to-local-compiled-git
+release-to-local-compiled-git: |$(RELEASE_BUILD_BASE_DIR)/.git
+	@echo "Building $(RELEASE_BRANCH_NAME) (GIT_BRANCH in make: $(GIT_BRANCH) in env: $$GIT_BRANCH; .git/HEAD: $(shell cat .git/HEAD))"
+
+	@# Make sure our checkout of the binary repo is up-to-date, so that the eventual git push doesn't have odd merge issues:
+	if [ "`cd $(RELEASE_BUILD_BASE_DIR) && export GIT_DIR=.git && git branch -r`" ] ; then cd $(RELEASE_BUILD_BASE_DIR) && export GIT_DIR=.git && git reset --hard HEAD && git pull -q ; fi
+
+	@# Update our staged, "compiled" version of the code:
+	ANGEL_SETTING_LOCK_DIR=$(shell pwd)/.build_data/lock $(MAKE) $(MFLAGS) release-build
+
+	@# Create an pull.sh script that git pulls from our binary repo and, when there are updates, installs (but does not activate) the new version:
+	@# (We do this in two scripts, so that the install script that's trigged by upgrade is the newly-fetched version.)
+	echo '#!/bin/bash' >$(RELEASE_BUILD_BASE_DIR)/pull.sh
+	echo 'set -e' >>$(RELEASE_BUILD_BASE_DIR)/pull.sh
+	echo 'SCRIPT_DIR=`readlink -e $$BASH_SOURCE | xargs dirname`' >>$(RELEASE_BUILD_BASE_DIR)/pull.sh
+	echo "cd \$$SCRIPT_DIR" >>$(RELEASE_BUILD_BASE_DIR)/pull.sh
+	echo 'if [ "`stat -c %U .`" != "`whoami`" ] ; then sudo -i -u `stat -c %U .` $$SCRIPT_DIR/pull.sh; exit $$?; fi' >>$(RELEASE_BUILD_BASE_DIR)/pull.sh
+	echo 'PRE_FETCH=`if [ -e .git/FETCH_HEAD ] ; then cat .git/FETCH_HEAD | head -1 | cut -b -7 ; fi`' >>$(RELEASE_BUILD_BASE_DIR)/pull.sh
+	echo 'PRE_VERSION=`if [ -e .git/FETCH_HEAD ] ; then cat ./.git/FETCH_HEAD | head -2 | tail -1 | cut -d \'"'"' -f 2 ; fi`' >>$(RELEASE_BUILD_BASE_DIR)/pull.sh
+	echo 'if [ -e "/root/.ssh/repo.key" ] ; then ssh-agent bash -c "ssh-add /root/.ssh/repo.key 2>/dev/null; git pull -q" ; else git pull -q; fi' >>$(RELEASE_BUILD_BASE_DIR)/pull.sh
+	echo 'POST_FETCH=`cat .git/FETCH_HEAD | head -1 | cut -b -7`' >>$(RELEASE_BUILD_BASE_DIR)/pull.sh
+	echo 'POST_VERSION=`cat ./.git/FETCH_HEAD | head -2 | tail -1 | cut -d \'"'"' -f 2`' >>$(RELEASE_BUILD_BASE_DIR)/pull.sh
+	echo 'if [ "$$PRE_FETCH" == "$$POST_FETCH" ] && [ -e "/usr/bin/angel" ] ; then exit 0 ; fi' >>$(RELEASE_BUILD_BASE_DIR)/pull.sh
+	echo 'echo "Pulling from binary repo on `hostname`: $$PRE_VERSION -> $$POST_VERSION"' >>$(RELEASE_BUILD_BASE_DIR)/pull.sh
+	echo './install.sh' >>$(RELEASE_BUILD_BASE_DIR)/pull.sh
+	chmod +x $(RELEASE_BUILD_BASE_DIR)/pull.sh
+
+	@# Create an install.sh script that adds the current git checkout version to our versioned install:
+	echo '#!/bin/bash' >$(RELEASE_BUILD_BASE_DIR)/install.sh
+	echo 'set -e' >>$(RELEASE_BUILD_BASE_DIR)/install.sh
+	echo 'SCRIPT_DIR=`readlink -e $$BASH_SOURCE | xargs dirname`' >>$(RELEASE_BUILD_BASE_DIR)/install.sh
+	@# fix .py files to have timestamps that match .pyc files:
+	echo "\$$SCRIPT_DIR/root/.angel/scripts/fix-py-mtimes \$$SCRIPT_DIR/root" >>$(RELEASE_BUILD_BASE_DIR)/install.sh
+	@# Install new version of the code: check if the version is installed, if not, it'll exit non-zero, so || that with the install (this is so set -e works correctly):
+	echo "\$$SCRIPT_DIR/root/bin/angel package check-version --silent --branch $(RELEASE_BRANCH_NAME) --version `cat $(RELEASE_BUILD_STAGE_DIR)/.angel/code_version` || \\" >>$(RELEASE_BUILD_BASE_DIR)/install.sh
+	echo "sudo -i \$$SCRIPT_DIR/root/bin/angel package add-version $(RELEASE_INSTALL_VERSIONS_DIR) \$$SCRIPT_DIR/root $(RELEASE_BRANCH_NAME) `cat $(RELEASE_BUILD_STAGE_DIR)/.angel/code_version`" >>$(RELEASE_BUILD_BASE_DIR)/install.sh
+	chmod +x $(RELEASE_BUILD_BASE_DIR)/install.sh
+
+	@# Create an activate.sh script that activates the version from the current git checkout:
+	echo '#!/bin/bash' >$(RELEASE_BUILD_BASE_DIR)/activate.sh
+	echo 'set -e' >>$(RELEASE_BUILD_BASE_DIR)/activate.sh
+	echo 'SCRIPT_DIR=`readlink -e $$BASH_SOURCE | xargs dirname`' >>$(RELEASE_BUILD_BASE_DIR)/activate.sh
+	echo "cd \$$SCRIPT_DIR" >>$(RELEASE_BUILD_BASE_DIR)/activate.sh
+	echo "sudo -i /usr/bin/angel package upgrade --branch $(RELEASE_BRANCH_NAME) --version `cat $(RELEASE_BUILD_STAGE_DIR)/.angel/code_version`" >>$(RELEASE_BUILD_BASE_DIR)/activate.sh
+	chmod +x $(RELEASE_BUILD_BASE_DIR)/activate.sh
+
+	@# Create an upgrade.sh script that pulls and activates the latest version in the binary repo:
+	@# (We split pull and activate up so that we can pull/install the code to all nodes before activating any of them,
+	@# so that services like storm can call on the newer version cross-box.)
+	echo '#!/bin/bash' >$(RELEASE_BUILD_BASE_DIR)/upgrade.sh
+	echo 'set -e' >>$(RELEASE_BUILD_BASE_DIR)/upgrade.sh
+	echo 'SCRIPT_DIR=`readlink -e $$BASH_SOURCE | xargs dirname`' >>$(RELEASE_BUILD_BASE_DIR)/upgrade.sh
+	echo "cd \$$SCRIPT_DIR" >>$(RELEASE_BUILD_BASE_DIR)/upgrade.sh
+	echo './pull.sh' >>$(RELEASE_BUILD_BASE_DIR)/upgrade.sh
+	echo './activate.sh' >>$(RELEASE_BUILD_BASE_DIR)/upgrade.sh
+	chmod +x $(RELEASE_BUILD_BASE_DIR)/upgrade.sh
+
+
+	cd $(RELEASE_BUILD_BASE_DIR) && export GIT_DIR=.git &&\
+		git add -A . &&\
+		git commit -m "Branch $(RELEASE_BRANCH_NAME) Version `cat $(RELEASE_BUILD_ROOT_SUBDIR)/.angel/code_version`" &&\
+		git tag -a `cat $(RELEASE_BUILD_ROOT_SUBDIR)/.angel/code_version` -m "Branch $(RELEASE_BRANCH_NAME) Version `cat $(RELEASE_BUILD_ROOT_SUBDIR)/.angel/code_version`" &&\
+		git push --follow-tags -u origin master
+
+	@# If we just built master, give a head's up to logged-in users
+	-if [ "master" == "$(RELEASE_BRANCH_NAME)" ] ; then echo "Build ready: $(RELEASE_BRANCH_NAME)-`cat $(RELEASE_BUILD_BASE_DIR)/$(RELEASE_BUILD_ROOT_SUBDIR)/.angel/code_version`; run angel-upgrade-prod to deploy." | angel-wall ; fi
+
+
+$(RELEASE_BUILD_BASE_DIR):
+	if [ "x" == "x$(RELEASE_BRANCH_NAME)" ] ; then echo "RELEASE_BRANCH_NAME not set!" && exit 1 ; fi
+	mkdir -p "$(RELEASE_BUILD_BASE_DIR)"
+
+
+$(RELEASE_BUILD_BASE_DIR)/.git: |$(RELEASE_REPO_BRANCH_DIR) $(RELEASE_BUILD_BASE_DIR)
+	cd $(RELEASE_BUILD_BASE_DIR) && export GIT_DIR=.git &&\
+		git init &&\
+		git config --global push.default simple &&\
+		git config --global user.name "Build Server" &&\
+		git config --global user.email "devops@angelprivate.com" &&\
+		git remote add origin $(RELEASE_REPO_BRANCH_DIR) &&\
+		git fetch
+	@# If the repo already exists, then we'll need to make sure we see its files locally:
+	if [ "`cd $(RELEASE_BUILD_BASE_DIR) && export GIT_DIR=.git && git branch -r`" ] ; then cd $(RELEASE_BUILD_BASE_DIR) && export GIT_DIR=.git && git checkout master ; fi
+
+$(RELEASE_REPO_BRANCH_DIR): release-build-dependencies |$(RELEASE_REPO_BASEDIR)
+	mkdir -p $(RELEASE_REPO_BRANCH_DIR)
+	chmod g+w $(RELEASE_REPO_BRANCH_DIR)  # Give group write access to git dir so repo user can do shallow clones
+	cd $(RELEASE_REPO_BRANCH_DIR) && git --bare init
+
+
+$(RELEASE_REPO_BASEDIR): release-build-dependencies
+	-mkdir -p $(RELEASE_REPO_BASEDIR)
+	if [ ! -e $(RELEASE_REPO_BASEDIR) ] ; then sudo bash -c "mkdir -p '$(RELEASE_REPO_BASEDIR)' && chown `id -un`.`id -gn` '$(RELEASE_REPO_BASEDIR)'" ; fi
+
+
+# We tuck this in here so that we can run "make" on a new Jenkins box and have the lower-level build stuff get triggered:
+.PHONY: release-build-dependencies
+
+ifeq ($(ANGEL_UNAME), Linux)
+release-build-dependencies: |/usr/bin/mk-build-deps
+	@# pass
+else
+release-build-dependencies:
+	@# pass
+endif
+
+/usr/bin/mk-build-deps:
+	echo "/usr/bin/mk-build-deps is missing! Triggering pre_activate, which will install project dependencies for you."
+	sudo ./build-scripts/angel/pre_activate.sh

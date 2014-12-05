@@ -1,0 +1,23 @@
+#!/bin/bash
+
+# This wrapper compiles lockrun if needed, so it can be called before make has ever run.
+# By default, the name of the exectuable is used as the lockname; an env variable named LOCKNAME
+# can be set to create finer-grained locks.
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+if [ "x" == "x$1" ] ; then
+	echo 1>&2 "Error: missing command to lockrun."
+	exit 1
+fi
+
+if [ ! -e "$DIR/../built/bin/lockrun" ] ; then
+	mkdir -p "$DIR/../built/bin/"
+	gcc "$DIR/../dependencies/lockrun/lockrun.c" -o "$DIR/../built/bin/lockrun-$$"
+	mv "$DIR/../built/bin/lockrun-$$" "$DIR/../built/bin/lockrun"
+fi
+
+exec "$DIR/../built/bin/lockrun" -L="/tmp/.lockrun-`echo $1$LOCKNAME | sed -e 's:\/:-:g'`" --maxtime=7200 --sleep=0.1 --wait -- $@
+
+# This should never be reached:
+exit 1

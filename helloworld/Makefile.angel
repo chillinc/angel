@@ -1,0 +1,53 @@
+
+# Define a generic clean rule that remove .pyo and .pyc files:
+.PHONY: clean-python-pyc-files
+clean-python-pyc-files:
+	-find . -name "*.pyc" -print0 | xargs -0 rm
+.PHONY: clean-python-pyo-files
+clean-python-pyo-files:
+	-find . -name "*.pyo" -print0 | xargs -0 rm
+ANGEL_CLEAN_TARGETS+=clean-python-pyc-files clean-python-pyo-files
+
+.PHONY: clean-python-stale-pyc
+clean-python-stale-pyc:
+	@# Remove any stale .pyc files under paths that we develop in that don't have a corresponding .py files:
+	@# (We do it this way for speed.)
+	@touch services/fake.pyc  # Because OS X xargs has no "--no-run-if-empty" option
+	@# Redirect to /dev/null because foo.py files that have no foo.pyc file will show up in list, but foo.pyc won't exist.
+	-find . -name "*.pyc" -or -name "*.py" | sort | sed -e 's:\.pyc:\.py:' | uniq -c | grep -v '  2 ' | awk '{print $$2"c"}' | xargs rm 2>/dev/null
+
+.PHONY: clean-python-stale-pyo
+clean-python-stale-pyo:
+	@# Remove any stale .pyo files under paths that we develop in that don't have a corresponding .py files:
+	@# (We do it this way for speed.)
+	@touch code/fake.pyo  # Because OS X xargs has no "--no-run-if-empty" option
+	@# Redirect to /dev/null because foo.py files that have no foo.pyc file will show up in list, but foo.pyc won't exist.
+	-find . -name "*.pyo" -or -name "*.py" | sort | sed -e 's:\.pyo:\.py:' | uniq -c | grep -v '  2 ' | awk '{print $$2"o"}' | xargs rm 2>/dev/null
+
+~/.angel:
+	@# Set up ~/.angel:
+	@# (If you want to use a different path, just create this path and leave it unused.)
+	@echo "Creating ~/.angel directory"
+	@mkdir -p ~/.angel/conf
+
+	@# Add bin paths and auto-complete to user's .profile file:
+	@echo >>~/.profile ""
+	@echo >>~/.profile "[[ -r '`pwd`/bin/angel' ]] && export PATH='`pwd`/bin':\$$PATH"
+	@echo >>~/.profile "[[ -r '`pwd`/services/devops/conf/bash_completion.d/angel' ]] && source '`pwd`/services/devops/conf/bash_completion.d/angel'"
+
+	@# Changes to DOTPROFILE won't get picked up until the user exits and restarts their shell.
+	@# For now, the defaults in our code will try ~/.angel/conf by default, so we don't actively need to see
+	@# the CONF_DIR override above.
+	@#echo ""
+	@#echo ""
+	@#echo " *** You need to run the following command and then run your command again:"
+	@#echo "           source $(DOTPROFILE)"
+	@#echo ""
+	@#echo ""
+	@#echo "(The next line should say \"make: *** [xxxxx] Error 1  ....   that's correct; read the above text.)"
+	@#false
+
+# Dev checkouts won't have /etc/angel, in which case we set up the system to use a dot directory:
+ifeq ($(wildcard /etc/angel),)
+ANGEL_BUILD_TARGETS+=~/.angel
+endif

@@ -1,0 +1,21 @@
+
+# Build services/*/src:
+# For every src dir in a services dir, add a target that runs "make build install" in each src dir with PREFIX set to output under our built dir:
+# (We could define Makefile.angel under each service/src dir and include them via a *, but the services stuff all happen to match this pattern rule.)
+
+ANGEL_BUILD_TARGETS+=$(shell cd $(ANGEL_BASE_DIR)/services && ls -d */src/Makefile 2>/dev/null | sed -e 's:\/src::' | sed -e 's:\/Makefile::' | xargs -I {} echo '$(ANGEL_BUILT_BASEDIR)/services/{}')
+$(ANGEL_BUILT_BASEDIR)/services/% : $(ANGEL_BASE_DIR)/services/%/src/Makefile
+	cd $(dir $<) && PREFIX=$(abspath $(ANGEL_BUILT_BASEDIR)/services/$*) $(MAKE) $(MFLAGS) build install
+	if [ ! -d $@ ]; then mkdir -p $@; fi
+	touch $@
+
+
+# If necessary:
+# Include ./services/*/Makefile.angel, for any services that want to add additional hooks into chill build/clean:
+#include $(call angel-get-cwd)/*/Makefile.angel
+
+
+ANGEL_CLEAN_TARGETS+=clean-services
+clean-services:
+	-ls ./services/*/src/Makefile 2>/dev/null | xargs -P 4 -I {} bash -c 'cd `dirname {}` && make clean'
+

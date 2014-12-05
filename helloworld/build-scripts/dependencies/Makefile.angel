@@ -1,0 +1,32 @@
+
+# Dependencies are meant for build-time dependencies, e.g. things that we need installed in order to even
+# run the build. These things come ahead of other dependencies, generally.
+
+
+# Enable if necessary:
+# Include subdir Makefiles:
+#include $(call angel-get-cwd)/*/Makefile.angel
+
+
+# On OS X, we need brew:
+ifeq ($(ANGEL_UNAME), Darwin)
+ANGEL_BUILD_TARGETS+=/usr/local/bin/brew
+endif
+
+
+/usr/local/bin/brew: |/System/Library/Frameworks/Ruby.framework/Versions/Current/usr/bin/ruby
+	echo y | $(ANGEL_BUILD_SCRIPTS_DIR)/dependencies/brew/bin/install-brew
+	angel-lockrun /usr/local/bin/brew doctor
+
+
+# Dependency for checking that brew is okay to install:
+/System/Library/Frameworks/Ruby.framework/Versions/Current/usr/bin/ruby:
+	@echo "Brew only runs on OS X. If you're on linux, a target is wrong; if on OS X, is Ruby missing?"
+	@false
+
+
+$(ANGEL_BUILD_SCRIPTS_DIR)/built/bin/lockrun:
+	mkdir -p $(ANGEL_BUILD_SCRIPTS_DIR)/built/bin/
+	gcc $(ANGEL_BUILD_SCRIPTS_DIR)/dependencies/lockrun/lockrun.c -o $(ANGEL_BUILD_SCRIPTS_DIR)/built/bin/lockrun
+
+ANGEL_BUILD_TARGETS+=$(ANGEL_BUILD_SCRIPTS_DIR)/built/bin/lockrun
