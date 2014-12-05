@@ -1,0 +1,71 @@
+#!/usr/bin/env python
+
+# Angel control script: This script sets up and verifies our environment and then hands off the requested action to the main control logic.
+# Jeff Potter; (c) 2010-2014 Chill Inc.
+# Apache License 2.0
+
+
+# >->->-> Currently, you MUST rename this control script to match your project name! <-<-<-<
+
+
+import os
+import sys
+import traceback
+
+# Figure out the name of our project by looking at the name of this control script.
+project_name = os.path.basename(os.path.realpath(__file__)).lower()  # "helloworld", "foobar", ...
+
+# Discover path to our project's base dir -- ideally via an env var or --path option (unimplemented), but in-between for now:
+envvar_to_project_dir_path = "%s_BASEDIR" % project_name.upper()
+if envvar_to_project_dir_path in os.environ:
+    project_base_dir = os.path.expanduser(os.environ[envvar_to_project_dir_path])
+    shared_module_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib")
+    project_entry_script = os.path.realpath(__file__)
+    # (Use realpath to clear any symlinks, so if we have a "current" link that changes in the future, we don't change.)
+else:
+    # Temporary legacy stuff: assume that we're inside a bin dir under the top of the project dir, and lib is under ./share/python:
+    project_base_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    shared_module_dir = os.path.join(project_base_dir, 'share', 'python')
+    project_entry_script = '.' + os.path.realpath(__file__)[len(project_base_dir):]
+    if not os.path.isdir(shared_module_dir):
+        print >>sys.stderr, "Warning: you probably need to set ENV var %s to point at your project basedir." % envvar_to_project_dir_path
+        print >>sys.stderr, "(Hint:  export %s=... )" % envvar_to_project_dir_path
+# Add angel lib to our import path:
+if not shared_module_dir in sys.path:
+    sys.path.insert(0, shared_module_dir)
+try:
+    import angel
+    import angel.exceptions
+except ImportError:
+    print >>sys.stderr, "\nError: missing angel lib '%s' (python sys.path setup failed?)" % shared_module_dir
+    sys.exit(2)
+
+# Create and run angel:
+try:
+    # Set up args for running angel ([1:] because 0th arg is the script name itself):
+    angel_args = angel.AngelArgParser(sys.argv[1:], project_name, project_base_dir, project_entry_script)
+    angel_args.create_angel().exec_args(angel_args._args)  # For now, passing in _args, eventually should just be angel_args
+
+except angel.exceptions.AngelArgException as e:
+    print >>sys.stderr, "\nError: %s" % e
+    sys.exit(2)
+
+except angel.exceptions.AngelExpectedException as e:
+    if 'ANGEL_DEBUG' in os.environ:
+        # Only show expected exception stacktraces when env.ANGEL_DEBUG exists
+        traceback.print_exc()
+    print >>sys.stderr, "\n%s error: %s" % (project_name.title(), e)
+    sys.exit(2)
+
+except KeyboardInterrupt:
+    sys.exit(4)
+
+except angel.exceptions.AngelUnexpectedException as e:
+    traceback.print_exc()
+    print >>sys.stderr, "\nFatal angel error: %s; *** send above stacktrace to developer ***." % e
+    sys.exit(2)
+
+except Exception as e:
+    traceback.print_exc()
+    print >>sys.stderr, "\nFatal error: %s; *** send above stacktrace to developer ***." % e
+    sys.exit(2)

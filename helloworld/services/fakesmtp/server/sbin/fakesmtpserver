@@ -1,0 +1,119 @@
+#!/usr/bin/python -u
+
+# Accept SMTP connections and optionally write messages to a local archive dir.
+#
+# Usage:
+#   fakesmtpserver [-h <host>] [-p <port>] [--archive-dir <path>] [--max-messages <N most recent>] [--auto-open]
+
+# Known Bugs:
+#  1) SMTPServer does a dns lookup on the connecting hostname, so this won't work without network (DNS server) access
+
+import asyncore
+import glob
+import os
+import random
+import smtpd
+import sys
+import time
+
+class FakesmtpServer(smtpd.SMTPServer):
+    
+    # Directory to store email .eml files:
+    archive_dir = None
+
+    # Only keep the most recent N messages:
+    max_messages_to_keep = 500
+
+    # If the 'open' command exists, automatically call it on delivery:
+    auto_open = True
+
+    def __init__(self, host, port, archive_dir, max_messages_to_keep, auto_open):
+        smtpd.SMTPServer.__init__(self, (host, port), None)
+        self.archive_dir = archive_dir
+        self.max_messages_to_keep = max_messages_to_keep
+        self.auto_open = auto_open
+
+
+    def process_message(self, peer, mailfrom, rcpttos, data):
+        if self.archive_dir is None:
+            print data
+            return
+        dest_file = os.path.join(self.archive_dir, 'message-%s-%s.eml' % (time.time(), int(random.random()*9000+1000)))
+        try:
+            open(dest_file, 'w').write(data)
+            print "Message delivered to %s" % dest_file
+            if self.auto_open and os.path.exists('/usr/bin/open'):
+                os.system('/usr/bin/open "%s"' % dest_file)
+        except Exception as e:
+            print "Error writing to %s: %s" % (dest_file, e)
+            return
+
+        # Remove message-*.eml files older than newest self.max_messages_to_keep messages:
+        eml_files = glob.glob(os.path.join(self.archive_dir, 'message-*.eml'))
+        files = list(reversed(sorted(eml_files, key=lambda f: os.stat(f).st_mtime)))
+        if len(files) > self.max_messages_to_keep:
+            files_to_delete = files[self.max_messages_to_keep:]
+            for file in files_to_delete:
+                try:
+                    os.remove(file)
+                    print "Removed old message %s" % file
+                except Exception as e:
+                    print >>sys.stderr, "Error: unable to remove old message %s: %s" % (file, e)
+
+
+if __name__ == "__main__":
+
+    port = 2525
+    host = '127.0.0.1'
+    archive_dir = None
+    auto_open = False
+    max_messages = 500
+
+    sys.argv.pop(0)
+    while len(sys.argv):
+        arg = sys.argv.pop(0)
+        if arg == '--port':
+            port = int(sys.argv.pop(0))
+        elif arg == '--host':
+            host = sys.argv.pop(0)
+        elif arg == '--archive-dir':
+            archive_dir = sys.argv.pop(0)
+        elif arg == '--auto-open':
+            auto_open = True
+        elif arg == '--max-messages':
+            max_messages = int(sys.argv.pop(0))
+        else:
+            print >>sys.stderr, "Error: unknown option %s" % arg
+            sys.exit(1)
+
+    if port < 1024 and os.getuid() != 0:
+        print >>sys.stderr, "Error: can't bind to port %s as non-root user." % port
+        sys.exit(1)
+
+    if auto_open is True and archive_dir is None:
+        print >>sys.stderr, "Error: can't auto-open files unless archive dir is specified."
+        sys.exit(2)
+
+    try:
+        smtp_server = FakesmtpServer(host, port, archive_dir, max_messages, auto_open)
+    except Exception as e:
+        print >>sys.stderr, "Error: unable to create smtp server: %s" % e
+        sys.exit(3)
+
+    if archive_dir is not None:
+        if not os.path.isdir(archive_dir):
+            try:
+                os.makedirs(archive_dir)
+            except Exception as e:
+                print >>sys.stderr, "Error: unable to create archive dir %s: %s" % (archive_dir, e)
+                sys.exit(4)
+
+    try:
+        print "FakesmtpServer: listening on %s:%s; saving %s most recent to dir %s; auto-open: %s" % (host, port, max_messages, archive_dir, auto_open)
+        print >>sys.stderr, "FakesmtpServer: test stderr print"
+        asyncore.loop()
+    except KeyboardInterrupt:
+        smtp_server.close()
+        print "FakesmtpServer: exiting"
+        sys.exit(0)
+

@@ -1,0 +1,208 @@
+# Bash autocomplete script
+
+# Figure out the name of our command based on our filename:
+me=`basename $BASH_SOURCE`
+
+# OS X doesn't have the "have" function defined; use "which" instead to work around this.
+which $me >/dev/null && complete -F angelAutocomplete $me
+
+angelAutocomplete()
+{
+    local cur prev prevprev opts exec_name exec_path project_base_dir debian_package_name_prefix readlink
+    exec_name=$me
+    # "readlink -f" doesn't work on OS X, so use greadlink when it exists
+    readlink=`which greadlink readlink | head -1`
+    exec_path=`which $exec_name | xargs $readlink -f`
+
+    if [ "x" == "x$exec_path" ]
+    then
+        return 1
+    fi
+
+    debian_package_name_prefix=$exec_name-
+    project_base_dir=`dirname $exec_path`/../
+
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    # Checking just based on the previous keyword isn't strictly right, as we're not actually parsing the command line
+    # args to see which command group we're underneath. However, very few of our subcommands use the same
+    # keywords, so this is really easy to implement and gets us 99% the way there.
+    # (The "right" way to do this would be to invoke exec_path with a special "give me auto-complete options" flag.)
+
+
+    # Start by handling auto-complete for "tool" commands:
+    # Support for "tool <command>" is a bit too clever, but really helpful:
+    local prevprev
+    if [[ ${#COMP_WORDS[@]} -gt 2 && "${prev}" != $exec_name ]]
+    then
+        prevprev="${COMP_WORDS[COMP_CWORD-2]}"
+    fi
+    case "${prevprev}" in
+        tool)
+            opts="`$exec_path --skip-make tool ${prev} get-autocomplete-options`"
+            COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+            return 0
+        ;;
+    esac
+
+
+    # Suggest auto-complete options based on the last word on the command line:
+    case "${prev}" in
+
+        --start-time)
+            return 0
+            ;;
+
+        --duration)
+            return 0
+            ;;
+
+        --dump)
+            return 0
+            ;;
+
+        service)
+            local subopts="autoconf conf help mode reload repair restart rotate-logs start stop"
+            COMPREPLY=( $(compgen -W "${subopts}" -- ${cur}) )
+            return 0
+            ;;
+
+        conf)
+            local subopts="set unset"
+            COMPREPLY=( $(compgen -W "${subopts}" -- ${cur}) )
+            return 0
+            ;;
+               set)
+                  COMPREPLY=( $(compgen -W "`$exec_path --skip-make show variables | sed -e 's:=: :' | awk '{print $1}'`" -- ${cur}) )
+                  return 0
+                  ;; 
+               unset)
+                  # For now, we can't autocomplete this -- we now have multiple conf dirs, not a setting for it.
+                  #COMPREPLY=( $(compgen -W "`$exec_path --skip-make show var CONF_DIR | xargs -I {} bash -c 'cat {}/*.conf' | grep -v '^#' | sed -e 's:=: :' | awk '{print $1}'`" -- ${cur}) )
+                  return 0
+                  ;; 
+        mode)
+            local subopts="maintenance regular"
+            COMPREPLY=( $(compgen -W "${subopts}" -- ${cur}) )
+            return 0
+            ;;
+          start|restart)
+            local subopts="--wait"
+            COMPREPLY=( $(compgen -W "${subopts}" -- ${cur}) )
+            return 0
+            ;;
+          stop)
+            local subopts="--hard"
+            COMPREPLY=( $(compgen -W "${subopts}" -- ${cur}) )
+            return 0
+            ;;
+
+        show)
+            local subopts="help logfiles logs traffic var vars"
+            COMPREPLY=( $(compgen -W "${subopts}" -- ${cur}) )
+            return 0
+            ;;
+          logs)
+            COMPREPLY=( $(compgen -W "--last --show-names --show-host `$exec_path --skip-make show var LOG_DIR | xargs -I {} bash -c 'if [ -e {} ] ; then cd {} && find . | cut -b 3- ; fi'`" -- ${cur}) )
+            return 0
+            ;;
+          logfiles)
+            COMPREPLY=( $(compgen -W "`$exec_path --skip-make show var LOG_DIR | xargs -I {} bash -c 'if [ -e {} ] ; then cd {} && find . | cut -b 3- ; fi'`" -- ${cur}) )
+            return 0
+            ;;
+          var|vars|variable|variables)
+            COMPREPLY=( $(compgen -W "--format `$exec_path --skip-make show variables | sed -e 's:=: :' | awk '{print $1}'`" -- ${cur}) )
+            return 0
+            ;;
+             --format)
+                 local subopts=".properties .py"
+                 COMPREPLY=( $(compgen -W "${subopts}" -- ${cur}) )
+                 return 0
+                 ;;
+
+        status)
+            local subopts="help --wait --format=nagios --format=collectd --format=silent --format=errors-only"
+            COMPREPLY=( $(compgen -W "${subopts}" -- ${cur}) )
+            return 0
+            ;;
+
+        package)
+            # Don't include decommission. Really, we shouldn't be auto-completing that...
+            local subopts="help add-version branch delete pinning purge rollback upgrade verify versions"
+            COMPREPLY=( $(compgen -W "${subopts}" -- ${cur}) )
+            return 0
+            ;;
+          delete)
+            local subopts="--branch"
+            COMPREPLY=( $(compgen -W "${subopts}" -- ${cur}) )
+            return 0
+            ;;
+          pinning)
+            local subopts="on off"
+            COMPREPLY=( $(compgen -W "${subopts}" -- ${cur}) )
+            return 0
+            ;;
+          purge)
+            local subopts="--keep-newest --more"
+            COMPREPLY=( $(compgen -W "${subopts}" -- ${cur}) )
+            return 0
+            ;;
+          upgrade)
+            local subopts="--branch --downgrade-allowed --download-only --force --jitter= --skip-reload --version --wait="
+            COMPREPLY=( $(compgen -W "${subopts}" -- ${cur}) )
+            return 0
+            ;;
+          verify)
+            local subopts="--branch --version"
+            COMPREPLY=( $(compgen -W "${subopts}" -- ${cur}) )
+            return 0
+            ;;
+
+        tool)
+            COMPREPLY=( $(compgen -W "`find "$project_base_dir/services" -maxdepth 2 -name '*_service.py' | grep -v '_common_' | grep -v _disabled | xargs -L 1 basename | sed -e 's:_service.py::' | tr _ -`" -- ${cur}) )
+            return 0
+            ;;
+
+        version)
+            return 0
+            ;;
+
+        --use-branch)
+            COMPREPLY=( $(compgen -W "`ls "$project_base_dir/../../" | grep -v _current_branch`" -- ${cur}) )
+            return 0
+            ;;
+
+        branch | --branch)
+            if [ 'Linux' == `uname` ]
+            then
+                COMPREPLY=($(compgen -W "`apt-cache search "$debian_package_name_prefix" | awk '{print $1}' | sed -e "s:^$debian_package_name_prefix::"`" -- ${cur}) )
+            fi
+            return 0
+            ;;
+
+		make)
+			COMPREPLY=( $(compgen -W "`cd $project_base_dir && make -qp | awk -F':' '/^[a-zA-Z0-9\/][^$#\t=]*:([^=]|$)/ {split($1,A,/ /);for(i in A)print A[i]}' | grep -v Makefile`" -- ${cur}) )
+			return 0
+			;;
+
+		manage)
+			return 0
+			;;
+			
+        *)
+            if [ 'Darwin' == `uname` ]
+            then
+                opts="--duration --if-branch --if-version --is-version --jitter --loop-forever --start-time                            --skip-make help make manage package service show status tool version"
+            else
+                opts="--duration --if-branch --if-version --is-version --jitter --loop-forever --start-time --use-branch --use-version --skip-make help make manage package service show status tool version"
+            fi
+            COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+            return 0
+            ;;
+
+    esac
+
+
+}

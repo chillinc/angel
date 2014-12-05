@@ -1,0 +1,3 @@
+
+PATH = /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+* * * * * root bash -c 'which helloworld 2>/dev/null >/dev/null && helloworld system cron >> /var/log/devops-cron.log 2>&1'

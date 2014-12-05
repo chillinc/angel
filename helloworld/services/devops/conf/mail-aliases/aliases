@@ -1,0 +1,6 @@
+### WARNING: This file is created automatically from our templates during install and version switches.
+###          Do not edit copies under /etc; changes will be lost.
+
+postmaster:    root
+root: localuser
+localuser: __HELLOWORLD_SETTING_SYSTEM_ADMIN_EMAIL__
