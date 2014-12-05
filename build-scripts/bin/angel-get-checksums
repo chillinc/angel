@@ -1,0 +1,26 @@
+#!/usr/bin/python -O
+
+import os
+import sys
+
+BASE_DIR=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.abspath('%s/lib' % BASE_DIR))
+
+try:
+   script_path = sys.argv.pop(0)
+   src_path = sys.argv.pop(0)
+except:
+   print >>sys.stderr, "Usage: %s <basepath>" % os.path.basename(script_path)
+   sys.exit(1)
+
+
+import angel.util.dedup_files
+checksums = angel.util.dedup_files.dedup_calculate_checksums(src_path)
+if checksums is None or not len(checksums):
+    print >>sys.stderr, "Error: no checksums found for path '%s'." % src_path
+    sys.exit(1)
+
+for file in sorted(checksums):
+    print '%s %s' % (checksums[file], file)
+
+
